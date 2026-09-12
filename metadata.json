@@ -1,0 +1,6 @@
+{
+  "name": "GVCN 360 MINI",
+  "description": "Ứng dụng quản lý giáo viên chủ nhiệm chuyên nghiệp: quản lý học sinh, bán trú, xe bus, điểm danh, điểm kiểm tra nhiều môn, thi đua và sổ liên lạc phụ huynh trực tuyến.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
