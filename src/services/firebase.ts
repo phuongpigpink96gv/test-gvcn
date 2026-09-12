@@ -1,4 +1,4 @@
-import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
+import { initializeApp, getApps, getApp, deleteApp, FirebaseApp } from 'firebase/app';
 import { 
   getFirestore, 
   doc, 
@@ -50,6 +50,38 @@ export function getSavedFirebaseConfig(): FirebaseConfigType | null {
   }
 }
 
+let activeApp: FirebaseApp | null = null;
+let activeFirestore: Firestore | null = null;
+let activeRTDB: RTDatabase | null = null;
+
+/**
+ * Resets Firebase instance when credentials change or are cleared
+ */
+export async function resetFirebaseApp(newConfig?: FirebaseConfigType | null) {
+  try {
+    const apps = getApps();
+    for (const app of apps) {
+      try {
+        await deleteApp(app);
+      } catch {
+        // ignore
+      }
+    }
+  } catch (err) {
+    console.warn('resetFirebaseApp cleanup warning:', err);
+  }
+  activeApp = null;
+  activeFirestore = null;
+  activeRTDB = null;
+
+  if (newConfig !== undefined) {
+    saveFirebaseConfig(newConfig);
+    if (newConfig && newConfig.apiKey && newConfig.projectId) {
+      initFirebase();
+    }
+  }
+}
+
 /**
  * Saves Firebase config to local storage
  */
@@ -61,12 +93,8 @@ export function saveFirebaseConfig(config: FirebaseConfigType | null) {
   }
 }
 
-let activeApp: FirebaseApp | null = null;
-let activeFirestore: Firestore | null = null;
-let activeRTDB: RTDatabase | null = null;
-
 /**
- * Initializes or retrieves the Firebase app
+ * Initializes or retrieves the Firebase app safely
  */
 export function initFirebase(): { 
   app: FirebaseApp | null; 
@@ -79,10 +107,14 @@ export function initFirebase(): {
   }
 
   try {
-    if (getApps().length === 0) {
+    // Look specifically for the [DEFAULT] app instance
+    const allApps = getApps();
+    const defaultApp = allApps.find(a => a.name === '[DEFAULT]');
+
+    if (!defaultApp) {
       activeApp = initializeApp(config);
     } else {
-      activeApp = getApp();
+      activeApp = defaultApp;
     }
     activeFirestore = getFirestore(activeApp);
 
@@ -92,6 +124,8 @@ export function initFirebase(): {
       } catch (rtdbErr) {
         console.warn('Realtime database init warning:', rtdbErr);
       }
+    } else {
+      activeRTDB = null;
     }
 
     return { app: activeApp, db: activeFirestore, rtdb: activeRTDB };
@@ -144,7 +178,7 @@ export async function syncToFirebase(data: AppSyncData): Promise<{ success: bool
     if (rtdb) {
       try {
         const dbRef = ref(rtdb, 'gvcn360_classes/' + FIREBASE_DOC_PATH);
-        await rtdbSet(dbRef, payload);
+        await withTimeout(rtdbSet(dbRef, payload), 8000, 'Lỗi timeout khi ghi vào Realtime Database');
         savedToRtdb = true;
       } catch (e) {
         console.warn('Could not save to Realtime Database:', e);
@@ -155,7 +189,7 @@ export async function syncToFirebase(data: AppSyncData): Promise<{ success: bool
     if (db) {
       try {
         const docRef = doc(db, 'gvcn360_classes', FIREBASE_DOC_PATH);
-        await setDoc(docRef, payload);
+        await withTimeout(setDoc(docRef, payload), 8000, 'Lỗi timeout khi ghi vào Firestore');
         savedToFirestore = true;
       } catch (e) {
         console.warn('Could not save to Firestore:', e);
@@ -210,7 +244,7 @@ export async function fetchFromFirebase(): Promise<{
     if (rtdb) {
       try {
         const dbRef = ref(rtdb, 'gvcn360_classes/' + FIREBASE_DOC_PATH);
-        const snapshot = await rtdbGet(dbRef);
+        const snapshot = await withTimeout(rtdbGet(dbRef), 8000, 'RTDB timeout');
         if (snapshot.exists()) {
           const d = snapshot.val() as AppSyncData;
           return {
@@ -227,7 +261,7 @@ export async function fetchFromFirebase(): Promise<{
     // Fallback to Firestore
     if (db) {
       const docRef = doc(db, 'gvcn360_classes', FIREBASE_DOC_PATH);
-      const docSnap = await getDoc(docRef);
+      const docSnap = await withTimeout(getDoc(docRef), 8000, 'Firestore timeout');
       if (docSnap.exists()) {
         const d = docSnap.data() as AppSyncData;
         return {
@@ -302,38 +336,107 @@ export function subscribeToFirebase(
 }
 
 /**
- * Tests Firebase Connection
+ * Helper to enforce timeout on promises
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, timeoutMsg: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(timeoutMsg)), ms)
+    ),
+  ]);
+}
+
+/**
+ * Tests Firebase Connection with a strict 7-second timeout and detailed error diagnostics
  */
 export async function testFirebaseConnection(config: FirebaseConfigType): Promise<{ success: boolean; message: string }> {
+  let testApp: FirebaseApp | null = null;
   try {
-    const testApp = initializeApp(config, 'testApp_' + Date.now());
+    testApp = initializeApp(config, 'testApp_' + Date.now());
     
-    // If Realtime Database URL is provided, test it
+    // If Realtime Database URL is provided, test it first
     if (config.databaseURL) {
       try {
         const rtdb = getDatabase(testApp);
         const testRef = ref(rtdb, 'gvcn360_classes/connection_test');
-        await rtdbSet(testRef, { testTimestamp: Date.now(), ping: 'ok' });
+        await withTimeout(
+          rtdbSet(testRef, { testTimestamp: Date.now(), ping: 'ok' }),
+          7000,
+          'TIMEOUT_RTDB'
+        );
         return {
           success: true,
-          message: 'Kết nối Firebase Realtime Database thành công! Sẵn sàng đồng bộ thời gian thực.',
+          message: 'Kết nối Firebase Realtime Database thành công! Sẵn sàng đồng bộ.',
         };
       } catch (rtdbErr: any) {
+        if (rtdbErr?.message === 'TIMEOUT_RTDB') {
+          return {
+            success: false,
+            message: 'Quá thời gian kết nối Realtime Database (sau 7 giây). Vui lòng kiểm tra: Bạn đã bấm "Create Database" trong mục Realtime Database và đặt Rules thành { "rules": { ".read": true, ".write": true } } chưa?',
+          };
+        }
         console.warn('RTDB test failed, trying Firestore:', rtdbErr);
       }
     }
 
+    // Test Firestore
     const db = getFirestore(testApp);
     const docRef = doc(db, 'gvcn360_classes', 'connection_test');
-    await setDoc(docRef, { testTimestamp: Date.now(), ping: 'ok' });
+    
+    await withTimeout(
+      setDoc(docRef, { testTimestamp: Date.now(), ping: 'ok' }),
+      7000,
+      'TIMEOUT_FIRESTORE'
+    );
+
     return {
       success: true,
-      message: 'Kết nối Firebase Firestore thành công! Sẵn sàng đồng bộ thời gian thực.',
+      message: 'Kết nối Firebase Firestore thành công! Sẵn sàng đồng bộ đám mây.',
     };
   } catch (err: any) {
+    const errorMsg = err?.message || String(err);
+    const errorCode = err?.code || '';
+
+    if (errorMsg === 'TIMEOUT_FIRESTORE') {
+      return {
+        success: false,
+        message: 'Hết thời gian chờ (sau 7 giây) mà không nhận được phản hồi từ Firebase. Nguyên nhân thường gặp:\n1. Chưa tạo cơ sở dữ liệu: Bạn cần vào Firebase Console -> Databases & Storage -> Firestore Database và bấm "Create database".\n2. Quyền Rules chưa mở: Trong tab Rules, chọn "Start in test mode" hoặc sửa thành "allow read, write: if true;".\n3. Sai Project ID hoặc API Key.',
+      };
+    }
+
+    if (errorCode === 'permission-denied' || errorMsg.includes('permission-denied') || errorMsg.includes('PERMISSION_DENIED')) {
+      return {
+        success: false,
+        message: 'Quyền truy cập bị từ chối (Permission Denied). Bạn cần vào Firebase Console > tab Rules > sửa thành allow read, write: if true; rồi bấm Publish.',
+      };
+    }
+
+    if (errorCode === 'not-found' || errorMsg.includes('NOT_FOUND')) {
+      return {
+        success: false,
+        message: 'Không tìm thấy cơ sở dữ liệu Firestore cho dự án này. Vui lòng vào Firebase Console > Databases & Storage > Firestore Database và bấm "Create database".',
+      };
+    }
+
+    if (errorCode === 'auth/invalid-api-key' || errorMsg.includes('API key not valid')) {
+      return {
+        success: false,
+        message: 'Mã API Key không hợp lệ. Vui lòng kiểm tra lại apiKey trong Project Settings của Firebase.',
+      };
+    }
+
     return {
       success: false,
-      message: err.message || 'Không thể kết nối với Firebase. Vui lòng kiểm tra lại apiKey, projectId và quyền Rules (chọn Test mode).',
+      message: errorMsg || 'Không thể kết nối với Firebase. Vui lòng kiểm tra lại apiKey, projectId và quyền Rules (chọn Test mode).',
     };
+  } finally {
+    if (testApp) {
+      try {
+        await deleteApp(testApp);
+      } catch {
+        // ignore testApp cleanup error
+      }
+    }
   }
 }

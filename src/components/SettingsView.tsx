@@ -25,6 +25,7 @@ import { saveClassInfo, clearAllClassData, generateId, generateToken, saveStuden
 import { 
   getSavedFirebaseConfig, 
   saveFirebaseConfig, 
+  resetFirebaseApp,
   syncToFirebase, 
   fetchFromFirebase, 
   testFirebaseConnection, 
@@ -77,6 +78,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [isFetchingFb, setIsFetchingFb] = useState(false);
   const [rawConfigPaste, setRawConfigPaste] = useState('');
   const [showFbGuide, setShowFbGuide] = useState(!isFirebaseConfigured());
+  const [fbTestError, setFbTestError] = useState<string | null>(null);
 
   // Sync state if external classInfo changes
   useEffect(() => {
@@ -215,20 +217,37 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
 
     setIsTestingFb(true);
+    setFbTestError(null);
     try {
       const res = await testFirebaseConnection(fbConfig);
       if (res.success) {
-        saveFirebaseConfig(fbConfig);
+        await resetFirebaseApp(fbConfig);
         setIsFbActive(true);
+        setFbTestError(null);
         onShowToast(res.message, 'success');
       } else {
-        onShowToast(res.message, 'error');
+        setFbTestError(res.message);
+        onShowToast('Kiểm tra kết nối thất bại. Xem chi tiết bên dưới.', 'error');
       }
     } catch (err: any) {
-      onShowToast(err.message || 'Lỗi kiểm tra Firebase', 'error');
+      const msg = err.message || 'Lỗi kiểm tra Firebase';
+      setFbTestError(msg);
+      onShowToast(msg, 'error');
     } finally {
       setIsTestingFb(false);
     }
+  };
+
+  // Quick save without ping test
+  const handleSaveDirectly = async () => {
+    if (!fbConfig.apiKey || !fbConfig.projectId) {
+      onShowToast('Vui lòng nhập tối thiểu apiKey và projectId', 'error');
+      return;
+    }
+    await resetFirebaseApp(fbConfig);
+    setIsFbActive(true);
+    setFbTestError(null);
+    onShowToast('Đã lưu cấu hình Firebase thành công!', 'success');
   };
 
   // Upload current data to Firebase
@@ -716,8 +735,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </div>
 
+          {/* Error / Diagnostic feedback box if test fails */}
+          {fbTestError && (
+            <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-2">
+              <div className="font-bold flex items-center gap-1.5 text-rose-800">
+                <span>⚠️ Kết quả kiểm tra kết nối:</span>
+              </div>
+              <p className="whitespace-pre-line font-medium leading-relaxed">{fbTestError}</p>
+              <div className="pt-2 flex flex-wrap items-center gap-2 border-t border-rose-200/60">
+                <span className="text-[11px] text-rose-700">Nếu bạn chắc chắn thông tin đúng và muốn lưu lại ngay:</span>
+                <button
+                  type="button"
+                  onClick={handleSaveDirectly}
+                  className="px-3 py-1 bg-white hover:bg-slate-50 border border-rose-300 text-rose-800 text-xs font-semibold rounded-md cursor-pointer"
+                >
+                  Lưu cấu hình ngay (Bỏ qua kiểm tra)
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Test and Save Button */}
-          <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-100">
             <button
               type="button"
               onClick={() => setShowFbGuide(!showFbGuide)}
@@ -727,16 +766,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               {showFbGuide ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
             </button>
 
-            <button
-              type="button"
-              id="btn-save-fb-config"
-              onClick={handleSaveAndTestFirebase}
-              disabled={isTestingFb}
-              className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-sm cursor-pointer transition-all"
-            >
-              <ShieldCheck className="w-4 h-4 text-emerald-300" />
-              <span>{isTestingFb ? 'Đang kiểm tra kết nối...' : 'KIỂM TRA & LƯU KẾT NỐI FIREBASE'}</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                id="btn-save-fb-direct"
+                onClick={handleSaveDirectly}
+                title="Lưu thông tin cấu hình vào ứng dụng mà không cần chờ ping kiểm tra"
+                className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg border border-slate-300 cursor-pointer transition-all"
+              >
+                Lưu trực tiếp
+              </button>
+
+              <button
+                type="button"
+                id="btn-save-fb-config"
+                onClick={handleSaveAndTestFirebase}
+                disabled={isTestingFb}
+                className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-sm cursor-pointer transition-all disabled:opacity-75"
+              >
+                <ShieldCheck className="w-4 h-4 text-emerald-300" />
+                <span>{isTestingFb ? 'Đang kiểm tra kết nối (tối đa 7 giây)...' : 'KIỂM TRA & LƯU KẾT NỐI FIREBASE'}</span>
+              </button>
+            </div>
           </div>
 
           {/* DETAILED 5-STEP FIREBASE GUIDE */}
